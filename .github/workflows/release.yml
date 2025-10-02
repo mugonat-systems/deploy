@@ -1,9 +1,9 @@
-name: Auto Release
+name: Auto Release (Packagist Compatible)
 
 on:
   push:
     branches:
-      - main  # Triggers on every push to main branch
+      - main
 
 jobs:
   release:
@@ -17,50 +17,96 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Generate version
+      - name: Get latest tag
+        id: latest_tag
+        run: |
+          # Get the latest semantic version tag
+          LATEST_TAG=$(git describe --tags --abbrev=0 --match "v[0-9]*.[0-9]*.[0-9]*" 2>/dev/null || echo "v0.0.0")
+          echo "LATEST_TAG=$LATEST_TAG" >> $GITHUB_OUTPUT
+          
+          # Extract version without 'v' prefix
+          VERSION=${LATEST_TAG#v}
+          echo "LATEST_VERSION=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Generate next version
         id: version
         run: |
-          # Generate version based on date and commit count
-          VERSION="v$(date +'%Y.%m.%d')-build.${{ github.run_number }}"
+          LATEST=${{ steps.latest_tag.outputs.LATEST_VERSION }}
+          
+          # Split version into components
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$LATEST"
+          
+          # Increment patch version
+          PATCH=$((PATCH + 1))
+          
+          # Create dev version with build number (Packagist compatible)
+          # Format: MAJOR.MINOR.PATCH-dev.BUILD_NUMBER
+          VERSION="$MAJOR.$MINOR.$PATCH-dev.${{ github.run_number }}"
+          TAG="v$VERSION"
+          
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "TAG=$TAG" >> $GITHUB_OUTPUT
 
-      - name: Check if release exists
-        id: check_release
+      - name: Check if tag exists
+        id: check_tag
         run: |
-          if git rev-parse "${{ steps.version.outputs.VERSION }}" >/dev/null 2>&1; then
+          if git rev-parse "${{ steps.version.outputs.TAG }}" >/dev/null 2>&1; then
             echo "exists=true" >> $GITHUB_OUTPUT
           else
             echo "exists=false" >> $GITHUB_OUTPUT
           fi
 
       - name: Create tag
-        if: steps.check_release.outputs.exists == 'false'
+        if: steps.check_tag.outputs.exists == 'false'
         run: |
           git config user.name github-actions
           git config user.email github-actions@github.com
-          git tag ${{ steps.version.outputs.VERSION }}
-          git push origin ${{ steps.version.outputs.VERSION }}
+          git tag ${{ steps.version.outputs.TAG }}
+          git push origin ${{ steps.version.outputs.TAG }}
 
-      - name: Get commit messages
+      - name: Get commit info
         id: commits
         run: |
-          COMMITS=$(git log -1 --pretty=format:"- %s (%h)")
+          COMMITS=$(git log -5 --pretty=format:"- %s (%h)" --no-merges | head -5)
+          COMMIT_MSG=$(git log -1 --pretty=format:"%s")
           echo "COMMITS<<EOF" >> $GITHUB_OUTPUT
           echo "$COMMITS" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
+          echo "COMMIT_MSG=$COMMIT_MSG" >> $GITHUB_OUTPUT
 
       - name: Create Release
-        if: steps.check_release.outputs.exists == 'false'
+        if: steps.check_tag.outputs.exists == 'false'
         uses: actions/create-release@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: ${{ steps.version.outputs.VERSION }}
-          release_name: Auto Release ${{ steps.version.outputs.VERSION }}
+          tag_name: ${{ steps.version.outputs.TAG }}
+          release_name: Development Build ${{ steps.version.outputs.VERSION }}
           body: |
-            Automated release from commit ${{ github.sha }}
+            ## 🚧 Development Build ${{ steps.version.outputs.VERSION }}
             
-            ## Latest Commit
+            **Auto-generated from commit:** ${{ github.sha }}
+            
+            **Latest commit:** ${{ steps.commits.outputs.COMMIT_MSG }}
+            
+            ### Recent Changes
             ${{ steps.commits.outputs.COMMITS }}
+            
+            ---
+            
+            ### Installation via Composer
+            ```bash
+            composer require your-vendor/your-package:dev-main
+            # or specific dev version
+            composer require your-vendor/your-package:${{ steps.version.outputs.VERSION }}
+            ```
+            
+            > ⚠️ This is a development release. Use stable versions for production.
           draft: false
-          prerelease: true  # Mark as pre-release
+          prerelease: true
+
+      # Optional: Notify Packagist (dev releases usually don't trigger this)
+      - name: Note about Packagist
+        run: |
+          echo "Development release created: ${{ steps.version.outputs.VERSION }}"
+          echo "Packagist will track this as a dev version."
