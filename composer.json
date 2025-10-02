@@ -1,0 +1,8 @@
+{
+    "$schema": "https://getcomposer.org/schema.json",
+    "name": "mugonat/deploy",
+    "version": "0.0.1",
+    "require-dev": {
+        "deployer/deployer": "^7.5"
+    }
+}
