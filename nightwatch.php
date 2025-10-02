@@ -5,8 +5,8 @@ namespace Deployer;
 use Exception;
 use RuntimeException;
 
+set('nightwatch_port', envGet('NIGHTWATCH_PORT', 2048));
 set('supervisor_deploy_script', '/usr/local/bin/deploy-supervisor-config');
-set('nightwatch_port', 2048);
 
 desc('Validate Nightwatch environment');
 task('deploy:nightwatch:validate', function () {
@@ -37,7 +37,7 @@ task('deploy:nightwatch:validate', function () {
 });
 
 desc('Configure Nightwatch when not configured');
-task('deploy:nightwatch', function () use ($port) {
+task('deploy:nightwatch', function () {
     // Validate environment first
     invoke('deploy:nightwatch:validate');
 

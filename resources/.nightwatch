@@ -1,0 +1,10 @@
+[program:{{hostname}}-nightwatch-agent]
+process_name=%(program_name)s
+command={{bin/php}} {{current_path}}/artisan nightwatch:agent --listen-on=127.0.0.1:{{port}}
+directory={{current_path}}
+autostart=true
+autorestart=true
+user={{remote_user}}
+numprocs=1
+redirect_stderr=true
+stdout_logfile=/var/log/supervisor/{{hostname}}-nightwatch-agent.log
