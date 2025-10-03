@@ -18,4 +18,4 @@ task('deploy:key', function () {
     });
 });
 
-before('artisan:config:cache', 'deploy:key:generate');
+before('artisan:config:cache', 'deploy:key');
