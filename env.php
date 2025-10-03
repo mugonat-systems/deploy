@@ -10,7 +10,7 @@ namespace Deployer;
  */
 function envGet(string $name, mixed $default = null)
 {
-    $envPath = __DIR__ . '/.env.deployer';
+    $envPath = getcwd() . '/.env.deployer';
 
     // Check if .env exists
     if (!file_exists($envPath)) {
