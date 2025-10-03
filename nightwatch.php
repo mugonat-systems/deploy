@@ -42,8 +42,8 @@ task('deploy:nightwatch', function () {
     invoke('deploy:nightwatch:validate');
 
     $host = str_replace('.', '', get('hostname'));
-    $source = __DIR__ . '/.nightwatch';
-    $compiled = __DIR__ . "/.nightwatch-$host.conf";
+    $source = getcwd() . '/.nightwatch';
+    $compiled = getcwd() . "/.nightwatch-$host.conf";
 
     // Validate source file exists
     if (!file_exists($source)) {
@@ -96,7 +96,7 @@ task('deploy:nightwatch:configure', function () {
     writeln('Configuring Nightwatch for ' . currentHost());
 
     $filename = "$host.conf";
-    $compiled = __DIR__ . "/.nightwatch-$filename";
+    $compiled = getcwd() . "/.nightwatch-$filename";
 
     // Validate compiled file exists before upload
     if (!file_exists($compiled)) {
