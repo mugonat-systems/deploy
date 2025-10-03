@@ -7,4 +7,8 @@ task('artisan:migrate:auto', function () {
     artisan('migrate:auto --force --seed')();
 });
 
-after('artisan:migrate', 'artisan:migrate:auto');
+set('hook_migrate_auto', true);
+
+if (get('hook_migrate_auto')) {
+    after('artisan:migrate', 'artisan:migrate:auto');
+}

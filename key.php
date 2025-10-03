@@ -18,4 +18,8 @@ task('deploy:key', function () {
     });
 });
 
-before('artisan:config:cache', 'deploy:key');
+set('hook_deploy_key', true);
+
+if (get('hook_deploy_key')) {
+    before('artisan:config:cache', 'deploy:key');
+}
