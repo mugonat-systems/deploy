@@ -9,6 +9,8 @@ task('artisan:migrate:auto', function () {
 
 set('hook_migrate_auto', true);
 
-if (get('hook_migrate_auto')) {
-    after('artisan:migrate', 'artisan:migrate:auto');
-}
+after('artisan:migrate', function () {
+    if (get('hook_migrate_auto')) {
+        invoke('artisan:migrate:auto');
+    }
+});

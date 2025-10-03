@@ -20,6 +20,8 @@ task('deploy:key', function () {
 
 set('hook_deploy_key', true);
 
-if (get('hook_deploy_key')) {
-    before('artisan:config:cache', 'deploy:key');
-}
+before('artisan:config:cache', function () {
+    if (get('hook_deploy_key')) {
+        invoke('deploy:key');
+    }
+});
