@@ -68,8 +68,7 @@ task('nightwatch:setup', function () {
 
     // Validate source file exists
     if (!file_exists($source)) {
-        writeln("⚠️ Nightwatch template not found: $source");
-        return;
+        $source = __DIR__ . '/resources/.nightwatch';
     }
 
     $config = currentHost()->config();
@@ -155,7 +154,7 @@ task('nightwatch:configure', function () {
 desc('Get status of Nightwatch agent');
 task('nightwatch:status', function () {
     cd('{{current_path}}');
-    run('{{bin/php}} nightwatch:status');
+    run('{{bin/php}} artisan nightwatch:status');
 });
 
 desc('Interactive setup for Nightwatch');
