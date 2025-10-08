@@ -84,6 +84,7 @@ task('deploy:nightwatch', function () {
     }
 
     invoke('deploy:nightwatch:configure');
+    invoke('deploy:nightwatch:status');
 
     // Clean up compiled file after deployment
     @unlink($compiled);
@@ -128,4 +129,10 @@ task('deploy:nightwatch:configure', function () {
         run("rm -f $remotePath");
         throw $e;
     }
+});
+
+desc('Get status of Nightwatch agent');
+task('deploy:nightwatch:status', function () {
+    cd('{{current_path}}');
+    run('{{bin/php}} nightwatch:status');
 });
