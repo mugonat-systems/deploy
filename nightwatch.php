@@ -136,3 +136,24 @@ task('deploy:nightwatch:status', function () {
     cd('{{current_path}}');
     run('{{bin/php}} nightwatch:status');
 });
+
+desc('Find next available port starting from 2048');
+task('deploy:nightwatch:find-port', function () {
+    $startPort = 2048;
+    $maxPort = 3048; // Check up to 1000 ports
+
+    writeln("Searching for available port starting from $startPort...");
+
+    for ($port = $startPort; $port <= $maxPort; $port++) {
+        // Check if port is in use using netstat or ss
+        $inUse = test("netstat -tuln 2>/dev/null | grep -q ':$port ' || ss -tuln 2>/dev/null | grep -q ':$port '");
+
+        if (!$inUse) {
+            writeln("✅ Found available port: $port");
+            set('nightwatch_port', $port);
+            return $port;
+        }
+    }
+
+    throw new RuntimeException("No available ports found between $startPort and $maxPort");
+});
