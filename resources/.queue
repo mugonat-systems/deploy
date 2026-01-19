@@ -1,0 +1,13 @@
+[program:{{hostname}}-queue-worker]
+process_name=%(program_name)s
+command={{bin/php}} {{current_path}}/artisan queue:work {{queue_connection}} --sleep=3 --tries=3 --max-time=3600
+autostart=true
+autorestart=true
+stopasgroup=true
+killasgroup=true
+user={{deploy_user}}
+numprocs=1
+redirect_stderr=true
+stdout_logfile=/var/log/supervisor/{{hostname}}-queue-worker-stdout---supervisor-%(process_num)02d.log
+stderr_logfile=/var/log/supervisor/{{hostname}}-queue-worker-stderr---supervisor-%(process_num)02d.log
+stopwaitsecs=3600

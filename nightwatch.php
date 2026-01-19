@@ -5,6 +5,8 @@ namespace Deployer;
 use Exception;
 use RuntimeException;
 
+require_once 'env.php';
+
 set('nightwatch_port', envGet('NIGHTWATCH_PORT', 2048));
 set('supervisor_deploy_script', '/usr/local/bin/deploy-supervisor-config');
 
@@ -153,19 +155,18 @@ task('nightwatch:configure', function () {
 
 desc('Get status of Nightwatch agent');
 task('nightwatch:status', function () {
-    cd('{{current_path}}');
-    run('{{bin/php}} artisan nightwatch:status');
+    writeln('<info>Checking nightwatch agent status...</info>');
+    supervisorStatus('nightwatch:agent');
 });
 
-desc('Interactive setup for Nightwatch');
-task('nightwatch', function () {
-    invoke('artisan:optimize:clear');
-
-    writeln('<info>Starting interactive Nightwatch setup...</info>');
-
-    // Find available port
-    invoke('nightwatch:find-port');
+desc('Configure Nightwatch environment variables');
+task('nightwatch:env', function () {
+    // Get the port (should be set by nightwatch:find-port or passed as parameter)
     $port = get('nightwatch_port');
+
+    if (empty($port)) {
+        throw new RuntimeException('Nightwatch port is required. Run nightwatch:find-port first.');
+    }
 
     // Ask for Nightwatch token
     $token = ask('Enter your Nightwatch token:');
@@ -187,12 +188,7 @@ task('nightwatch', function () {
         return;
     }
 
-    // Backup and update .env file
     $envPath = '{{deploy_path}}/shared/.env';
-
-    writeln('Creating backup of .env file...');
-    run("cp $envPath $envPath.backup");
-    writeln('✅ Backup created: .env.backup');
 
     // Remove existing Nightwatch configuration if present
     run("sed -i '/^NIGHTWATCH_TOKEN=/d' $envPath");
@@ -211,14 +207,54 @@ EOT;
     run("echo '$config' >> $envPath");
     writeln('✅ .env file updated with Nightwatch configuration');
 
-    // Store port for later use
-    set('nightwatch_port', $port);
+    writeln('');
+    writeln('<info>Nightwatch environment configuration completed!</info>');
+});
+
+desc('Configure Laravel log channel for Nightwatch');
+task('nightwatch:log-channel', function () {
+    $envPath = '{{deploy_path}}/shared/.env';
+
+    writeln('<info>Configuring log channel for Nightwatch...</info>');
+    writeln('');
+    writeln('<comment>Configuration to be added:</comment>');
+    writeln('  LOG_CHANNEL=stack');
+    writeln('  LOG_STACK=daily,nightwatch');
+    writeln('');
+
+    if (!askConfirmation('Do you want to proceed?', true)) {
+        writeln('Setup cancelled.');
+        return;
+    }
+
+    // Remove existing LOG_CHANNEL and LOG_STACK if present
+    run("sed -i '/^LOG_CHANNEL=/d' $envPath");
+    run("sed -i '/^LOG_STACK=/d' $envPath");
+
+    // Append new log configuration
+    $config = <<<EOT
+
+# Laravel Log Channel Configuration
+LOG_CHANNEL=stack
+LOG_STACK=daily,nightwatch
+EOT;
+
+    run("echo '$config' >> $envPath");
+    writeln('✅ Log channel configuration updated');
 
     writeln('');
-    writeln('<info>Nightwatch setup completed successfully!</info>');
-    writeln('');
+    writeln('<info>Log channel configuration completed!</info>');
+});
 
-    // Configure Nightwatch
+desc('Interactive setup for Nightwatch');
+task('nightwatch', function () {
+    invoke('artisan:optimize:clear');
+
+    writeln('<info>Starting interactive Nightwatch setup...</info>');
+
+    invoke('env:backup');
+    invoke('nightwatch:env');
+    invoke('nightwatch:log-channel');
     invoke('nightwatch:setup');
     invoke('artisan:optimize');
 });

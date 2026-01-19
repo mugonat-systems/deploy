@@ -50,3 +50,12 @@ function envGet(string $name, mixed $default = null)
 
     return $default;
 }
+
+desc('Backup .env file');
+task('env:backup', function () {
+    $envPath = '{{deploy_path}}/shared/.env';
+
+    writeln('Creating backup of .env file...');
+    run("cp $envPath $envPath.backup" . time());
+    writeln('✅ Backup created: .env.backup');
+});
