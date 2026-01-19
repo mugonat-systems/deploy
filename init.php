@@ -2,7 +2,7 @@
 
 namespace Deployer;
 
-set('keep_releases', 2);
+set('keep_releases', 3);
 
 task('env:init', function () {
     $exampleFile = getcwd() . '/.env.deployer.example';

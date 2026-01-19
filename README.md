@@ -17,6 +17,7 @@ require 'vendor/mugonat/deploy/utils.php';
 
 // Config
 
+set('hook_backup', true);
 set('hook_migrate_auto', true);
 set('hook_node_modules', true);
 set('hook_deploy_key', true);

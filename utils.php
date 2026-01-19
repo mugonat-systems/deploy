@@ -9,3 +9,4 @@ require_once __DIR__ . '/migrate_auto.php';
 require_once __DIR__ . '/nightwatch.php';
 require_once __DIR__ . '/node_modules.php';
 require_once __DIR__ . '/init.php';
+require_once __DIR__ . '/backup.php';
