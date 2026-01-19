@@ -15,9 +15,10 @@ namespace Deployer;
 require 'recipe/laravel.php';
 require 'vendor/mugonat/deploy/utils.php';
 
-// Config
+// Config (Package Defaults)
 
-set('hook_backup', true);
+set('hook_backup', false);
+set('hook_backup_db', true);
 set('hook_migrate_auto', true);
 set('hook_node_modules', true);
 set('hook_deploy_key', true);
