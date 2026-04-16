@@ -49,6 +49,9 @@ The `utils.php` file includes the following files:
 ### `env.php`
 
 *   **Purpose:** Provides a function `envGet()` to read configuration values from a `.env.deployer` file in the project root. It prefixes the variable names with `DEPLOYER_` but also checks for the unprefixed name.
+*   **Tasks:**
+    *   `env:backup`: Creates a backup of the `.env` file on the host.
+    *   `env:update`: Interactively updates or adds a variable in the `.env` file on the host. It fetches possible new variable names from the local `.env.example` and `.env` files, creates a backup first, and runs `artisan:optimize` after.
 *   **Options:** The options are the environment variables themselves, defined in the `.env.deployer` file. The script gives precedence to variables prefixed with `DEPLOYER_`.
 *   **Hooks:** None.
 
