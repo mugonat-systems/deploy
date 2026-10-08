@@ -1,12 +1,15 @@
 # Deployer Utils
 
-This repository contains a collection of utility scripts for [Deployer](https://deployer.org/), a PHP deployment tool. These scripts streamline common deployment tasks.
+Collection of utility recipes for [Deployer](https://deployer.org/) — Laravel helpers for key generation, migrations, assets, backups, env management and Nightwatch.
+
+> **Branch `0.x`** targets **Deployer 7.x** (`deployer/deployer ^7.5`). For Deployer 8.x use branch `1.x` (`mugonat/deploy ^1.0`).
 
 ```bash
-composer require mugonat/deploy deployer/deployer --dev
+composer require mugonat/deploy:^0.1 deployer/deployer:^7.5 --dev
 ```
 
-Here's a typical `deploy.php`
+Typical `deploy.php`:
+
 ```php
 <?php
 
@@ -15,20 +18,21 @@ namespace Deployer;
 require 'recipe/laravel.php';
 require 'vendor/mugonat/deploy/utils.php';
 
-// Config (Package Defaults)
-
+// Package defaults — override in your deploy.php
 set('hook_backup', false);
 set('hook_backup_db', true);
-set('hook_migrate_auto', true);
 set('hook_node_modules', true);
 set('hook_deploy_key', true);
+
+set('hook_migrate_auto', false);
+set('auto_migrate_seed', true);
+set('auto_migrate_force', true);
 
 add('shared_files', []);
 add('shared_dirs', []);
 add('writable_dirs', []);
 
 // Hosts
-
 host('app.domain.tld')
     ->set('branch', 'deployment/client')
     ->set('http_user', 'site-user')
@@ -36,85 +40,68 @@ host('app.domain.tld')
     ->setDeployPath('/home/{{remote_user}}/htdocs/{{hostname}}');
 
 // Hooks
-
 after('deploy:failed', 'deploy:unlock');
 after('deploy:success', 'artisan:optimize');
 after('push', 'artisan:optimize');
 ```
 
-## Included Files
+See [`example/deploy.php`](example/deploy.php) and [`example/composer.json`](example/composer.json) for a runnable scaffold.
 
-The `utils.php` file includes the following files:
+## Compatibility
+
+| Branch | Deployer | PHP | Install |
+|---|---|---|---|
+| `1.x` | `^8.0` | `^8.3` | `composer require mugonat/deploy:^1.0` |
+| `0.x` | `^7.5` | `^8.0` | `composer require mugonat/deploy:^0.1` |
+
+## What `utils.php` loads
+
+`env.php` → `git.php` → `key.php` → `migrate_auto.php` → `nightwatch.php` → `node_modules.php` → `init.php` → `backup.php`
 
 ### `env.php`
 
-*   **Purpose:** Provides a function `envGet()` to read configuration values from a `.env.deployer` file in the project root. It prefixes the variable names with `DEPLOYER_` but also checks for the unprefixed name.
-*   **Tasks:**
-    *   `env:backup`: Creates a backup of the `.env` file on the host.
-    *   `env:update`: Interactively updates or adds a variable in the `.env` file on the host. It fetches possible new variable names from the local `.env.example` and `.env` files, creates a backup first, and runs `artisan:optimize` after.
-*   **Options:** The options are the environment variables themselves, defined in the `.env.deployer` file. The script gives precedence to variables prefixed with `DEPLOYER_`.
-*   **Hooks:** None.
+* `envGet(string $name, mixed $default = null)` — reads `.env.deployer` from `getcwd()`, prefers `DEPLOYER_<NAME>` then `<NAME>`, strips quotes, coerces `true`/`false`/`null`/`empty`.
+* **Tasks:** `env:backup` (copies `{{release_or_current_path}}/.env` to `.env.backup-<timestamp>`), `env:update` (interactive update/add with suggestions from local `.env.example`/`.env`, then `artisan:optimize`).
 
 ### `git.php`
 
-*   **Purpose:** Sets the `repository` and `branch` variables for Deployer based on environment variables from the `.env.deployer` file.
-*   **Options:**
-    *   `git_user`: The Git user. Defaults to `dev-mugonat`. Can be overridden by `DEPLOYER_GIT_USER` or `GIT_USER` in `.env.deployer`.
-    *   `git_password`: The Git password or token. Can be overridden by `DEPLOYER_GIT_PASS` or `GIT_PASS` in `.env.deployer`.
-    *   `git_repo`: The Git repository name. Can be overridden by `DEPLOYER_GIT_REPO` or `GIT_REPO` in `.env.deployer`.
-    *   `git_repo_path`: The path to the repository on the Git server. Defaults to the `git_user`. Can be overridden by `DEPLOYER_GIT_REPO_PATH` or `GIT_REPO_PATH` in `.env.deployer`.
-    *   `git_repo_branch`: The branch to deploy. Defaults to `main`. Can be overridden by `DEPLOYER_GIT_BRANCH` or `GIT_BRANCH` in `.env.deployer`.
-    *   `git_domain`: The Git domain. Defaults to `gitlab.com`. Can be overridden by `DEPLOYER_GIT_DOMAIN` or `GIT_DOMAIN` in `.env.deployer`.
-*   **Hooks:** None.
+Sets `repository`/`branch` from `.env.deployer` (`GIT_USER`/`GIT_PASS`/`GIT_REPO`/`GIT_REPO_PATH`/`GIT_BRANCH`/`GIT_DOMAIN` and `DEPLOYER_` prefixed variants; defaults `dev-mugonat` / `main` / `gitlab.com`).
 
 ### `init.php`
 
-*   **Purpose:** Provides initialization tasks for the project.
-*   **Tasks:**
-    *   `env:init`: Creates a `.env.deployer` file from the example if it doesn't exist.
-    *   `nightwatch:init`: Creates a `.nightwatch` file from the example if it doesn't exist.
-    *   `utils:init`: A meta-task that runs `env:init` and `nightwatch:init`.
-*   **Options:** None.
-*   **Hooks:** None.
+* `env:init` — scaffold `.env.deployer.example` / `.env.deployer`
+* `nightwatch:init` — scaffold `.nightwatch`
+* `utils:init` — both
 
 ### `key.php`
 
-*   **Purpose:** Defines a task to generate an application key if it's missing in the `.env` file on the server.
-*   **Tasks:**
-    *   `deploy:key`: Generates the application key.
-*   **Options:**
-    *   `hook_deploy_key`: A boolean to enable or disable the `before('artisan:config:cache', 'deploy:key')` hook. Defaults to `true`.
-*   **Hooks:**
-    *   `before('artisan:config:cache', 'deploy:key')`: This task runs before `artisan:config:cache`.
+* `deploy:key` — within `{{release_or_current_path}}`, generates `APP_KEY` only when missing (`hook_deploy_key` before `artisan:config:cache`, default `true`).
 
 ### `migrate_auto.php`
 
-*   **Purpose:** Defines a task to run "auto" migrations.
-*   **Tasks:**
-    *   `artisan:migrate:auto`: Runs `php artisan migrate:auto --force --seed`.
-*   **Options:**
-    *   `hook_migrate_auto`: A boolean to enable or disable the `after('artisan:migrate', 'artisan:migrate:auto')` hook. Defaults to `true`.
-*   **Hooks:**
-    *   `after('artisan:migrate', 'artisan:migrate:auto')`: This task runs after `artisan:migrate`.
+* `artisan:migrate:auto` — `migrate:auto` with `auto_migrate_force`/`auto_migrate_seed`
+* `artisan:migrate` — **overridden**; delegates to `migrate:auto` when `hook_migrate_auto` is true, else stock `migrate --force` (both `skipIfNoEnv`). Defaults `hook_migrate_auto=true` (file) / `false` in example.
 
 ### `nightwatch.php`
 
-*   **Purpose:** Contains tasks for validating and configuring Nightwatch, a browser automation testing framework. It sets up a supervisor service to keep the Nightwatch agent running.
-*   **Tasks:**
-    *   `deploy:nightwatch:validate`: Checks if `supervisord` is running and if the deploy script is available.
-    *   `deploy:nightwatch`: The main task that configures Nightwatch. It creates a configuration file and sets up the supervisor service.
-    *   `deploy:nightwatch:configure`: A sub-task of `deploy:nightwatch` that handles the actual configuration and service setup.
-*   **Options:**
-    *   `nightwatch_port`: The port for the Nightwatch service. Defaults to `2048`. Can be overridden by `DEPLOYER_NIGHTWATCH_PORT` or `NIGHTWATCH_PORT` in `.env.deployer`.
-    *   `supervisor_deploy_script`: The path to the supervisor deploy script. Defaults to `/usr/local/bin/deploy-supervisor-config`.
-*   **Hooks:** None.
+* `nightwatch:find-port` (2048–3048 scan), `nightwatch:validate`, `nightwatch:setup`, `nightwatch:configure`, `nightwatch:status`, and interactive `nightwatch` (port + token → update `shared/.env` → setup → optimize). Config `nightwatch_port` / `supervisor_deploy_script`.
 
 ### `node_modules.php`
 
-*   **Purpose:** Defines a task to install npm dependencies and build the frontend assets.
-*   **Tasks:**
-    *   `deploy:node_modules`: Runs `npm install` and `npm run build`.
-*   **Options:**
-    *   `hook_node_modules`: A boolean to enable or disable the `after('deploy:vendors', 'deploy:node_modules')` hook. Defaults to `true`.
-*   **Hooks:**
-    *   `after('deploy:vendors', 'deploy:node_modules')`: This task runs after `deploy:vendors`.
+* `deploy:node_modules` — `cd {{release_or_current_path}}`, `{{node_install_command}}` (`npm ci`) + each `{{node_build_scripts}}` (`['build']`), cleans `node_modules` in `finally`. Hook `after('deploy:vendors', …)` via `hook_node_modules`.
+
+### `backup.php`
+
+* `backup:database` / `backup` / `backup:cleanup` (`artisan backup:run …` via spatie/laravel-backup). `hook_backup_db=true` (`before artisan:migrate`), `hook_backup=false` (`after deploy:prepare`).
+
+## Recent changes
+
+- `env:backup` / `env:update` added
+- Hook split `hook_backup` / `hook_backup_db` (defaults `false` / `true`) with deferred conditional wrappers
+- `node_modules` — configurable `node_install_command`/`node_build_scripts`, `finally` cleanup
+- `migrate_auto` — runtime override of `artisan:migrate`, `auto_migrate_force`/`seed`, `skipIfNoEnv`
+- `key` — quiet when key exists, `info()` on generation
+- `nightwatch` — port discovery, validation, interactive setup, template fallback
+- Example scaffold `example/deploy.php` + `example/composer.json` added
+- `1.x` branch created for Deployer 8 (`quote()`, `php ^8.3`, `deployer ^8.0`)
+
