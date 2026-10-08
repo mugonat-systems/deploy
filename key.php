@@ -17,6 +17,12 @@ task('deploy:key', function () {
 
 set('hook_deploy_key', true);
 
+before('artisan:optimize', function () {
+    if (get('hook_deploy_key')) {
+        invoke('deploy:key');
+    }
+});
+
 before('artisan:config:cache', function () {
     if (get('hook_deploy_key')) {
         invoke('deploy:key');
