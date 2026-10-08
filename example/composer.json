@@ -1,7 +1,7 @@
 {
     "require": {
-        "mugonat/deploy": "^0.1.9",
-        "deployer/deployer": "^7.5"
+        "mugonat/deploy": "^1.0",
+        "deployer/deployer": "^8.0"
     },
     "repositories": [
         {
