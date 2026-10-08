@@ -1,8 +1,8 @@
 # Deployer Utils
 
-Collection of utility recipes for [Deployer](https://deployer.org/) — Laravel helpers for key generation, migrations, assets, backups, env management and Nightwatch.
+Collection of utility recipes for [Deployer](https://deployer.org/) — Laravel-focused helpers for key generation, migrations, assets, backups, env management and Nightwatch.
 
-> **Branch `0.x`** targets **Deployer 7.x** (`deployer/deployer ^7.5`). For Deployer 8.x use branch `1.x` (`mugonat/deploy ^1.0`).
+> **Branch `0.x`** targets **Deployer 7.x** (`deployer/deployer ^7.5`). For Deployer 8.x use branch `1.x` (`mugonat/deploy ^1.0`, PHP `^8.3`).
 
 ```bash
 composer require mugonat/deploy:^0.1 deployer/deployer:^7.5 --dev
@@ -18,7 +18,7 @@ namespace Deployer;
 require 'recipe/laravel.php';
 require 'vendor/mugonat/deploy/utils.php';
 
-// Package defaults — override in your deploy.php
+// Package defaults — override in your deploy.php as needed
 set('hook_backup', false);
 set('hook_backup_db', true);
 set('hook_node_modules', true);
@@ -45,63 +45,116 @@ after('deploy:success', 'artisan:optimize');
 after('push', 'artisan:optimize');
 ```
 
-See [`example/deploy.php`](example/deploy.php) and [`example/composer.json`](example/composer.json) for a runnable scaffold.
+See [`example/deploy.php`](example/deploy.php) and [`example/composer.json`](example/composer.json) for a runnable scaffold (`composer install` inside `example/` uses the local path repo).
 
 ## Compatibility
 
-| Branch | Deployer | PHP | Install |
+| Package branch | Deployer | PHP   | Install |
 |---|---|---|---|
 | `1.x` | `^8.0` | `^8.3` | `composer require mugonat/deploy:^1.0` |
 | `0.x` | `^7.5` | `^8.0` | `composer require mugonat/deploy:^0.1` |
 
 ## What `utils.php` loads
 
+`utils.php` simply requires:
+
 `env.php` → `git.php` → `key.php` → `migrate_auto.php` → `nightwatch.php` → `node_modules.php` → `init.php` → `backup.php`
+
+You can also `require` individual files.
 
 ### `env.php`
 
-* `envGet(string $name, mixed $default = null)` — reads `.env.deployer` from `getcwd()`, prefers `DEPLOYER_<NAME>` then `<NAME>`, strips quotes, coerces `true`/`false`/`null`/`empty`.
-* **Tasks:** `env:backup` (copies `{{release_or_current_path}}/.env` to `.env.backup-<timestamp>`), `env:update` (interactive update/add with suggestions from local `.env.example`/`.env`, then `artisan:optimize`).
+* **Purpose:** `envGet(string $name, mixed $default = null)` reads `.env.deployer` from `getcwd()`. Checks `DEPLOYER_<NAME>` first, then `<NAME>`, strips surrounding quotes and coerces `true`/`false`/`null`/`empty`.
+* **Tasks:**
+  * `env:backup` — copies `{{release_or_current_path}}/.env` to `.env.backup-<timestamp>` if present.
+  * `env:update` — interactive: backs up, parses remote `.env`, lets you update an existing key or add a new one (suggests names from local `.env.example`/`.env`), then `artisan:optimize`.
+* **Hooks:** none.
 
 ### `git.php`
 
-Sets `repository`/`branch` from `.env.deployer` (`GIT_USER`/`GIT_PASS`/`GIT_REPO`/`GIT_REPO_PATH`/`GIT_BRANCH`/`GIT_DOMAIN` and `DEPLOYER_` prefixed variants; defaults `dev-mugonat` / `main` / `gitlab.com`).
+* **Purpose:** sets `repository` and `branch` from `.env.deployer`.
+* **Config (via `envGet` / `get` fallback):**
+  * `git_user` / `GIT_USER` / `DEPLOYER_GIT_USER` (default `dev-mugonat`)
+  * `git_password` / `GIT_PASS` / `DEPLOYER_GIT_PASS`
+  * `git_repo` / `GIT_REPO` / `DEPLOYER_GIT_REPO`
+  * `git_repo_path` / `GIT_REPO_PATH` / `DEPLOYER_GIT_REPO_PATH` (default `git_user`)
+  * `git_repo_branch` / `GIT_BRANCH` / `DEPLOYER_GIT_BRANCH` (default `main`)
+  * `git_domain` / `GIT_DOMAIN` / `DEPLOYER_GIT_DOMAIN` (default `gitlab.com`)
+* Builds `https://<user>:<pass>@<domain>/<path>/<repo>.git`.
 
 ### `init.php`
 
-* `env:init` — scaffold `.env.deployer.example` / `.env.deployer`
-* `nightwatch:init` — scaffold `.nightwatch`
-* `utils:init` — both
+* **Purpose:** bootstrap helpers.
+* **Tasks:**
+  * `env:init` — copies `resources/.env.deployer.example` → `.env.deployer.example` and then `.env.deployer` (if missing).
+  * `nightwatch:init` — copies `resources/.nightwatch` → `.nightwatch` (if missing).
+  * `utils:init` — runs both.
+* **Hooks:** none.
 
 ### `key.php`
 
-* `deploy:key` — within `{{release_or_current_path}}`, generates `APP_KEY` only when missing (`hook_deploy_key` before `artisan:config:cache`, default `true`).
+* **Tasks:** `deploy:key` — within `{{release_or_current_path}}`, checks `APP_KEY` is set and runs `{{bin/php}} artisan key:generate --force` only when missing (quiet on success via `info()`).
+* **Config:** `hook_deploy_key` (default `true`) — `before('artisan:config:cache', 'deploy:key')`.
 
 ### `migrate_auto.php`
 
-* `artisan:migrate:auto` — `migrate:auto` with `auto_migrate_force`/`auto_migrate_seed`
-* `artisan:migrate` — **overridden**; delegates to `migrate:auto` when `hook_migrate_auto` is true, else stock `migrate --force` (both `skipIfNoEnv`). Defaults `hook_migrate_auto=true` (file) / `false` in example.
+* **Purpose:** optional replacement for the stock `artisan:migrate`.
+* **Tasks:**
+  * `artisan:migrate:auto` — runs `migrate:auto` with flags derived from config (`--force` / `--seed`).
+  * `artisan:migrate` — **overridden**; at runtime delegates to `artisan:migrate:auto` when `hook_migrate_auto` is true, otherwise runs the stock `migrate --force` (both with `skipIfNoEnv`).
+* **Config:**
+  * `hook_migrate_auto` (default `true` in this file; `false` in the `example/deploy.php` scaffold — set per host)
+  * `auto_migrate_force` (default `true` — adds `--force`)
+  * `auto_migrate_seed` (default `true` — adds `--seed`)
+* **Example:**
+  ```php
+  set('hook_migrate_auto', true);
+  set('auto_migrate_force', true);
+  set('auto_migrate_seed', false); // skip seeding on this host
+  ```
 
 ### `nightwatch.php`
 
-* `nightwatch:find-port` (2048–3048 scan), `nightwatch:validate`, `nightwatch:setup`, `nightwatch:configure`, `nightwatch:status`, and interactive `nightwatch` (port + token → update `shared/.env` → setup → optimize). Config `nightwatch_port` / `supervisor_deploy_script`.
+* **Purpose:** Nightwatch browser-agent setup via supervisor.
+* **Tasks:**
+  * `nightwatch:find-port` — scans `2048–3048` for a free port, sets `nightwatch_port`.
+  * `nightwatch:validate` — checks `supervisord` running, wrapper script exists/executable, supervisor conf dir present.
+  * `nightwatch:setup` — validates, renders `resources/.nightwatch` (or local `.nightwatch`) with `{{bin/php}}`/`{{current_path}}`/`{{port}}`/`{{hostname}}` replacements, uploads via `{{deploy_path}}`, invokes `nightwatch:configure`.
+  * `nightwatch:configure` — uploads compiled conf to `{{deploy_path}}/<host>.conf` and runs `sudo <supervisor_deploy_script> <remotePath> <host>-nightwatch-agent`.
+  * `nightwatch:status` — `{{bin/php}} artisan nightwatch:status` in `{{current_path}}`.
+  * `nightwatch` — interactive: clear optimize, find port, ask token, confirm, backup/update `{{deploy_path}}/shared/.env` (`NIGHTWATCH_TOKEN`, `NIGHTWATCH_REQUEST_SAMPLE_RATE=0.1`, `NIGHTWATCH_INGEST_URI=127.0.0.1:<port>`), then `nightwatch:setup` + `artisan:optimize`.
+* **Config:**
+  * `nightwatch_port` (default `2048`, via `envGet('NIGHTWATCH_PORT')`)
+  * `supervisor_deploy_script` (default `/usr/local/bin/deploy-supervisor-config`)
 
 ### `node_modules.php`
 
-* `deploy:node_modules` — `cd {{release_or_current_path}}`, `{{node_install_command}}` (`npm ci`) + each `{{node_build_scripts}}` (`['build']`), cleans `node_modules` in `finally`. Hook `after('deploy:vendors', …)` via `hook_node_modules`.
+* **Tasks:** `deploy:node_modules` — `cd {{release_or_current_path}}`, runs `{{node_install_command}}` then each `{{node_build_scripts}}` entry (`npm run <script>` via `escapeshellarg` on `0.x`; `quote()` on `1.x`), always cleans `node_modules` afterwards.
+* **Config:**
+  * `hook_node_modules` (default `true`) — `after('deploy:vendors', 'deploy:node_modules')`
+  * `node_install_command` (default `npm ci`)
+  * `node_build_scripts` (default `['build']`, string or array — e.g. `['build','storybook']`)
 
 ### `backup.php`
 
-* `backup:database` / `backup` / `backup:cleanup` (`artisan backup:run …` via spatie/laravel-backup). `hook_backup_db=true` (`before artisan:migrate`), `hook_backup=false` (`after deploy:prepare`).
+* **Tasks:** `backup:database` / `backup` / `backup:cleanup` — thin wrappers around `artisan('backup:run …')` (spatie/laravel-backup).
+* **Config:** `hook_backup_db` (`true`), `hook_backup` (`false`) — `before('artisan:migrate', 'backup:database')` and `after('deploy:prepare', 'backup')`.
+* Requires `spatie/laravel-backup` in the host app.
 
 ## Recent changes
 
-- `env:backup` / `env:update` added
-- Hook split `hook_backup` / `hook_backup_db` (defaults `false` / `true`) with deferred conditional wrappers
-- `node_modules` — configurable `node_install_command`/`node_build_scripts`, `finally` cleanup
-- `migrate_auto` — runtime override of `artisan:migrate`, `auto_migrate_force`/`seed`, `skipIfNoEnv`
-- `key` — quiet when key exists, `info()` on generation
-- `nightwatch` — port discovery, validation, interactive setup, template fallback
-- Example scaffold `example/deploy.php` + `example/composer.json` added
-- `1.x` branch created for Deployer 8 (`quote()`, `php ^8.3`, `deployer ^8.0`)
+- **env tasks** (`env:backup`, `env:update`) — backup + interactive add/update of remote `.env` with local suggestions.
+- **Deploy hooks** — `hook_backup_db` / `hook_backup` split, defaults `hook_backup_db=true`, `hook_backup=false`; other hooks (`hook_node_modules`, `hook_deploy_key`) deferred via conditional wrappers.
+- **node_modules** — `node_install_command` / `node_build_scripts` configurability, cleanup in `finally`.
+- **migrate_auto** — now overrides `artisan:migrate` at runtime (instead of `after` hook); new variables `hook_migrate_auto`, `auto_migrate_force`, `auto_migrate_seed`; `skipIfNoEnv`.
+- **key** — quiet when `APP_KEY` already present; uses `info()` on generation.
+- **nightwatch** — port discovery (`nightwatch:find-port`), validation, interactive `nightwatch` setup, `artisan:optimize:clear` integration, template fallback.
+- **Example scaffold** — `example/deploy.php` + `example/composer.json` (path repo) added.
+- **Deployer 8** — `1.x` branch: `quote()` migration, `composer.json` requires `deployer ^8.0` / `php ^8.3`.
+
+## Docs
+
+- Deployer 7: https://deployer.org/docs/7.x/getting-started
+- Deployer 8: https://deployer.org/docs/8.x/getting-started
+- Resources: `resources/.env.deployer.example`, `resources/.nightwatch`
 
