@@ -1,8 +1,11 @@
 {
     "$schema": "https://getcomposer.org/schema.json",
     "name": "mugonat/deploy",
-    "version": "0.1.8",
-    "require-dev": {
+    "version": "0.1.9",
+    "require": {
         "deployer/deployer": "^7.5"
+    },
+    "conflict": {
+        "deployer/deployer": ">=8.0"
     }
 }

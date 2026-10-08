@@ -10,10 +10,7 @@ task('deploy:key', function () {
 
         if (!$keyExists) {
             run('{{bin/php}} artisan key:generate --force');
-            writeln('<info>Application key generated</info>');
-        } else {
-            $currentKey = run('grep "^APP_KEY=" .env | head -1');
-            writeln('<comment>⚠️  APP_KEY already exists: ' . trim($currentKey) . '</comment>');
+            info('Application key generated');
         }
     });
 });

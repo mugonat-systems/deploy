@@ -1,0 +1,12 @@
+{
+    "require": {
+        "mugonat/deploy": "^0.1.9",
+        "deployer/deployer": "^7.5"
+    },
+    "repositories": [
+        {
+            "type": "path",
+            "url": "../"
+        }
+    ]
+}
