@@ -54,10 +54,14 @@ See [`example/deploy.php`](example/deploy.php) and [`example/composer.json`](exa
 | `1.x` | `^8.0` | `^8.3` | `composer require mugonat/deploy:^1.0` |
 | `0.x` | `^7.5` | `^8.0` | `composer require mugonat/deploy:^0.1` |
 
-Deployer 8 migration notes (applied on `1.x`):
-- `escapeshellarg()` → Deployer `quote()` (ANSI-C `$'...'` quoting).
+## Deployer 8 migration notes (applied on `1.x`)
+
+Per https://deployer.org/docs/8.x/UPGRADE and https://deployer.org/docs/8.x/getting-started:
+
+- `escapeshellarg()` → Deployer `quote()` (ANSI-C `$'...'` quoting) — applied in `node_modules.php`.
 - `run()` options now use named arguments (`timeout:`, `nothrow:`); this repo had no affected calls — verified.
-- Requires PHP 8.3+ and Symfony 7.4/8.0 per [Deployer 8 UPGRADE](https://deployer.org/docs/8.x/UPGRADE).
+- Requires PHP 8.3+ and Symfony 7.4/8.0.
+- **Deploy recipe changed:** Deployer 7 `deploy` ran `artisan:config:cache`, `artisan:route:cache`, `artisan:view:cache`, `artisan:event:cache` as separate steps. Deployer 8 `deploy` runs `artisan:optimize` (which wraps config/route/view caching) and adds `artisan:reload` after `deploy:publish`. Verified with `vendor/bin/dep tree deploy` in `example/` on each branch. The `deploy:key` hook was updated accordingly — `before('artisan:optimize')` for deploy (plus `before('artisan:config:cache')` kept for manual runs). Other hooks (`before artisan:migrate`, `after deploy:prepare/vendors`) remain valid on both trees.
 
 ## What `utils.php` loads
 
@@ -98,7 +102,7 @@ You can also `require` individual files.
 ### `key.php`
 
 * **Tasks:** `deploy:key` — within `{{release_or_current_path}}`, checks `APP_KEY` is set and runs `{{bin/php}} artisan key:generate --force` only when missing (quiet on success via `info()`).
-* **Config:** `hook_deploy_key` (default `true`) — `before('artisan:config:cache', 'deploy:key')`.
+* **Config:** `hook_deploy_key` (default `true`) — `before('artisan:optimize')` **and** `before('artisan:config:cache')` on `1.x` (Deployer 8 deploy uses `optimize`; `config:cache` kept for manual runs). On `0.x` it was `before('artisan:config:cache')` only.
 
 ### `migrate_auto.php`
 
@@ -145,13 +149,14 @@ You can also `require` individual files.
 - **Deploy hooks** — `hook_backup_db` / `hook_backup` split, defaults `hook_backup_db=true`, `hook_backup=false`; other hooks (`hook_node_modules`, `hook_deploy_key`) deferred via conditional wrappers.
 - **node_modules** — `node_install_command` / `node_build_scripts` configurability, `quote()` for script names, cleanup in `finally`.
 - **migrate_auto** — now overrides `artisan:migrate` at runtime (instead of `after` hook); `auto_migrate_force`/`auto_migrate_seed` flags; `skipIfNoEnv`.
-- **key** — quiet when `APP_KEY` already present; uses `info()` on generation.
+- **key** — quiet when `APP_KEY` already present; uses `info()` on generation; `1.x` now hooks `before artisan:optimize` (Deployer 8) in addition to `config:cache`.
 - **nightwatch** — port discovery (`nightwatch:find-port`), validation, interactive `nightwatch` setup, `artisan:optimize:clear` integration, template fallback.
 - **Example scaffold** — `example/deploy.php` + `example/composer.json` (path repo) added.
-- **Deployer 8** — `1.x` branch: `quote()` migration, `composer.json` requires `deployer ^8.0` / `php ^8.3`.
+- **Deployer 8** — `1.x` branch: `quote()` migration, `composer.json` requires `deployer ^8.0` / `php ^8.3`, deploy tree `artisan:optimize`/`artisan:reload` verified.
 
 ## Docs
 
 - Deployer 8: https://deployer.org/docs/8.x/getting-started and https://deployer.org/docs/8.x/UPGRADE
+- Deployer 7: https://deployer.org/docs/7.x/getting-started
 - Resources: `resources/.env.deployer.example`, `resources/.nightwatch`
 
