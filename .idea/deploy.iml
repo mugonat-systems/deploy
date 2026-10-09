@@ -5,6 +5,9 @@
       <sourceFolder url="file://$MODULE_DIR$/spec" isTestSource="true" />
       <excludeFolder url="file://$MODULE_DIR$/vendor/composer" />
       <excludeFolder url="file://$MODULE_DIR$/vendor/deployer/deployer" />
+      <excludeFolder url="file://$MODULE_DIR$/example/vendor/composer" />
+      <excludeFolder url="file://$MODULE_DIR$/example/vendor/deployer/deployer" />
+      <excludeFolder url="file://$MODULE_DIR$/example/vendor/mugonat/deploy" />
     </content>
     <orderEntry type="inheritedJdk" />
     <orderEntry type="sourceFolder" forTests="false" />
