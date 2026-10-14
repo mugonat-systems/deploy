@@ -2,6 +2,8 @@
 
 namespace Deployer;
 
+use Symfony\Component\Console\Formatter\OutputFormatter;
+
 /*
  * deploy:patch - patch the CURRENT release in place with the changes from a branch.
  *
@@ -13,13 +15,13 @@ namespace Deployer;
  *   dep deploy:patch:rollback app.domain.tld                      # undo the last patch
  *   dep deploy:patch:rollback app.domain.tld -o patch_rollback_all=true
  *
- * How it works
- *   1. Fetches the branch into Deployer's cached mirror ({{deploy_path}}/.dep/repo).
- *   2. Works out which commit the current release is on (last patch, else releases_log).
- *   3. Writes `git diff --binary <current>..<target>` to {{deploy_path}}/.dep/patches/<release>/.
- *   4. `git apply --check`, then `git apply` (atomic: all or nothing) in the current release.
- *   5. Runs only the follow-up tasks the changed files call for (vendors, node, migrate, optimize).
- *   6. Rollback = `git apply -R` of the stored patch, last-in-first-out.
+ * Speed: every remote command is a round trip, so the work is batched into as few as possible.
+ *   1. probe     lock + current release + patch history + REVISION          (1 round trip)
+ *   2. prepare   fetch ONLY the target branch, resolve commits, summary     (1 round trip)
+ *   3. apply     diff -> patch file -> git apply -> save history            (1 round trip)
+ *   4. post      only the tasks the changed files call for (patch_task_map)
+ *   5. finish    unlock + tidy                                              (1 round trip)
+ * Rollback = `git apply -R` of the stored patch, last-in-first-out.
  */
 
 // Config
@@ -31,40 +33,86 @@ set('patch_dry_run', false);
 set('patch_allow_downgrade', false);     // allow target that is behind the current commit
 set('patch_rollback_all', false);
 set('patch_migrate', true);              // run artisan:migrate if migrations changed
-set('patch_post_tasks', ['artisan:optimize']);
+set('patch_lock', true);                 // hold the deploy lock while patching
+set('patch_timing', true);               // print how long the patch took
 set('patch_dir', '{{deploy_path}}/.dep/patches');
 set('patch_repo', '{{deploy_path}}/.dep/repo');
 
+// Tasks that always run after a patch/rollback, whatever changed
+set('patch_post_tasks', []);
+
+// regex on changed file paths => tasks to run. Order matters (vendors -> migrate -> optimize).
+set('patch_task_map', [
+    '~^composer\.(json|lock)$~' => ['deploy:vendors'],
+    '~^(package(-lock)?\.json|(vite|webpack|tailwind|postcss)\.config\.\w+|webpack\.mix\.js|resources/(js|css|sass|scss|ts|images|fonts)/)~' => ['deploy:node_modules'],
+    '~^database/(migrations|seeders)/~' => ['artisan:migrate'],
+    '~^(config|routes|bootstrap)/|^resources/views/|^composer\.(json|lock)$|^\.env~' => ['artisan:optimize'],
+]);
+
 // Helpers
 
-function patchReleasePath(): string
+/** One round trip: (optionally) take the lock and read everything we need about the current release. */
+function patchProbe(bool $lock): array
 {
-    return trim(run('readlink -f {{current_path}}'));
+    $script = [
+        'cd {{deploy_path}} || exit 1',
+        '[ -L {{current_path}} ] || { echo ERR=nocurrent; exit 0; }',
+        '[ -d {{patch_repo}} ] || { echo ERR=norepo; exit 0; }',
+    ];
+
+    if ($lock) {
+        $script[] = 'mkdir -p {{deploy_path}}/.dep';
+        $script[] = '( set -o noclobber; echo "deploy:patch ($(id -un))" > {{deploy_path}}/.dep/deploy.lock ) 2>/dev/null'
+            . ' && echo LOCKED=me || echo "LOCKED=other:$(cat {{deploy_path}}/.dep/deploy.lock)"';
+    }
+
+    $script[] = 'path=$(readlink -f {{current_path}})';
+    $script[] = 'rel=$(basename "$path")';
+    $script[] = 'echo "PATH=$path"';
+    $script[] = 'echo "REL=$rel"';
+    $script[] = '[ -s {{patch_dir}}/$rel/stack.json ] && echo "STACK=$(cat {{patch_dir}}/$rel/stack.json)"';
+    $script[] = '[ -f {{current_path}}/REVISION ] && echo "REVISION=$(head -c 64 {{current_path}}/REVISION)"';
+    $script[] = 'true';
+
+    $out = run(implode(' ; ', $script));
+
+    preg_match_all('~^([A-Z]+)=(.*)$~m', $out, $matches, PREG_SET_ORDER);
+    $v = [];
+    foreach ($matches as $m) {
+        $v[$m[1]] = trim($m[2]);
+    }
+
+    if (($v['ERR'] ?? '') === 'nocurrent') {
+        throw new \RuntimeException('No current release found. Run deploy first.');
+    }
+    if (($v['ERR'] ?? '') === 'norepo') {
+        throw new \RuntimeException('Git cache {{patch_repo}} not found. Run deploy first.');
+    }
+    if (str_starts_with($v['LOCKED'] ?? '', 'other:')) {
+        throw new \RuntimeException(
+            'Deploy locked by ' . substr($v['LOCKED'], 6) . ".\nExecute \"deploy:unlock\" task to unlock."
+        );
+    }
+    if (($v['LOCKED'] ?? '') === 'me') {
+        set('patch_locked', true);
+    }
+
+    // let the existing tasks (vendors, node_modules, artisan:*) work on the live release
+    set('release_path', $v['PATH']);
+    set('release_or_current_path', $v['PATH']);
+
+    return [
+        'path' => $v['PATH'],
+        'release' => $v['REL'],
+        'stack' => isset($v['STACK']) ? (json_decode($v['STACK'], true) ?: []) : [],
+        'revision' => $v['REVISION'] ?? null,
+    ];
 }
 
-function patchStackFile(string $release): string
+function patchCurrentRev(array $ctx): string
 {
-    return "{{patch_dir}}/$release/stack.json";
-}
-
-function patchStack(string $release): array
-{
-    $file = patchStackFile($release);
-
-    return test("[ -s $file ]") ? (json_decode(run("cat $file"), true) ?: []) : [];
-}
-
-function patchSaveStack(string $release, array $stack): void
-{
-    run('mkdir -p {{patch_dir}}/' . $release);
-    run('printf %s ' . escapeshellarg(json_encode(array_values($stack))) . ' > ' . patchStackFile($release));
-}
-
-function patchCurrentRev(string $release): string
-{
-    $stack = patchStack($release);
-    if ($stack) {
-        return end($stack)['to'];
+    if ($ctx['stack']) {
+        return end($ctx['stack'])['to'];
     }
 
     if ($base = get('patch_base')) {
@@ -72,151 +120,234 @@ function patchCurrentRev(string $release): string
     }
 
     // REVISION file written into the release by the deploy
-    if (test('[ -f {{current_path}}/REVISION ]')) {
-        $rev = trim(run('cat {{current_path}}/REVISION'));
-        if (preg_match('~^[0-9a-f]{7,40}$~i', $rev)) {
-            return $rev;
-        }
+    if ($ctx['revision'] && preg_match('~^[0-9a-f]{7,40}$~i', $ctx['revision'])) {
+        return $ctx['revision'];
     }
 
-    if (test('[ -f {{deploy_path}}/.dep/releases_log ]')) {
-        $lines = array_reverse(array_filter(explode("\n", run('cat {{deploy_path}}/.dep/releases_log'))));
-        foreach ($lines as $line) {
-            $entry = json_decode($line, true);
-            if (($entry['release_name'] ?? null) === $release) {
-                $rev = $entry['revision'] ?? $entry['rev'] ?? null;
-                if ($rev) {
-                    return $rev;
-                }
+    $log = run('cat {{deploy_path}}/.dep/releases_log 2>/dev/null || true');
+    foreach (array_reverse(array_filter(explode("\n", $log))) as $line) {
+        $entry = json_decode($line, true);
+        if (($entry['release_name'] ?? null) === $ctx['release']) {
+            $rev = $entry['revision'] ?? $entry['rev'] ?? null;
+            if ($rev) {
+                return $rev;
             }
         }
     }
 
     throw new \RuntimeException(
-        "Cannot detect the commit release $release is on. Pass it with -o patch_base=<sha>."
+        "Cannot detect the commit release {$ctx['release']} is on. Pass it with -o patch_base=<sha>."
     );
 }
 
-function patchGit(string $args): string
+function patchSection(string $out, string $name): string
 {
-    return trim(run('git -C {{patch_repo}} ' . $args, env: ['GIT_TERMINAL_PROMPT' => '0']));
+    return preg_match('~^@@' . $name . '$\R?(.*?)(?=^@@|\z)~ms', $out, $m) ? trim($m[1]) : '';
 }
 
-function patchApply(string $file, bool $reverse = false): void
+function patchWriteStack(array $stack, string $release): string
 {
-    $flags = '--whitespace=nowarn' . ($reverse ? ' -R' : '');
-    $path = patchReleasePath();
+    return 'printf %s ' . escapeshellarg(json_encode(array_values($stack)))
+        . ' > {{patch_dir}}/' . $release . '/stack.json';
+}
 
-    run("cd $path && git apply --check $flags $file");
-    run("cd $path && git apply $flags $file");
+/** Builds ONE command that reverts the last $count patches. Returns [command, remaining stack, reverted entries]. */
+function patchRevertPlan(array $stack, string $release, string $path, int $count): array
+{
+    $dir = '{{patch_dir}}/' . $release;
+    $cmds = ['cd ' . escapeshellarg($path)];
+    $reverted = [];
+
+    while ($count-- > 0 && $stack) {
+        $entry = array_pop($stack);
+        $reverted[] = $entry;
+
+        if ($entry['file']) {
+            $cmds[] = "git apply --whitespace=nowarn -R $dir/{$entry['file']}";
+        }
+        $cmds[] = patchWriteStack($stack, $release);
+        if ($entry['file']) {
+            $cmds[] = "rm -f $dir/{$entry['file']}";
+        }
+    }
+
+    return [implode(' && ', $cmds), $stack, $reverted];
+}
+
+// Output helpers. writeln() only prefixes the host on the first line of a string,
+// so multi-line output is always printed one line at a time. Text is escaped so
+// commit messages containing <tags> can't break the console formatter.
+
+function patchLines(string $text, string $indent = '  ', string $style = ''): void
+{
+    foreach (explode("\n", rtrim($text)) as $line) {
+        $line = OutputFormatter::escape($indent . $line);
+        writeln($style ? "<$style>$line</>" : $line);
+    }
+}
+
+function patchOk(string $message): void
+{
+    writeln('<fg=green>✔</> ' . OutputFormatter::escape($message));
+}
+
+function patchNote(string $message): void
+{
+    writeln('<fg=cyan>•</> ' . OutputFormatter::escape($message));
+}
+
+function patchWarn(string $message): void
+{
+    writeln('<fg=yellow>!</> ' . OutputFormatter::escape($message));
+}
+
+/** Keep long lists readable: first $max lines plus a "+N more" line. */
+function patchTrim(string $text, int $max, string $what): string
+{
+    $lines = array_values(array_filter(explode("\n", $text), 'strlen'));
+    if (count($lines) <= $max) {
+        return implode("\n", $lines);
+    }
+
+    return implode("\n", array_slice($lines, 0, $max)) . "\n… " . (count($lines) - $max) . " more $what";
 }
 
 function patchInvoke(string $task): void
 {
     if (Deployer::get()->tasks->has($task)) {
-        info("running $task");
         invoke($task);
     } else {
-        warning("skipping $task (task not defined)");
+        patchWarn("skipping $task (task not defined)");
     }
 }
 
 function patchPostTasks(array $files, bool $migrate = true): array
 {
-    $touched = fn (string $regex): bool => (bool) preg_grep($regex, $files);
     $tasks = [];
 
-    if ($touched('~^composer\.(json|lock)$~')) {
-        $tasks[] = 'deploy:vendors';
-    }
+    foreach (get('patch_task_map') as $regex => $list) {
+        if (!preg_grep($regex, $files)) {
+            continue;
+        }
 
-    if (get('hook_node_modules', false)
-        && $touched('~^(package(-lock)?\.json|vite\.config\.\w+|webpack\.mix\.js|resources/)~')) {
-        $tasks[] = 'deploy:node_modules';
-    }
-
-    if ($migrate && get('patch_migrate') && $touched('~^database/(migrations|seeders)/~')) {
-        $tasks[] = 'artisan:migrate';
+        foreach ((array) $list as $task) {
+            if ($task === 'deploy:node_modules' && !get('hook_node_modules', false)) {
+                continue;
+            }
+            if ($task === 'artisan:migrate' && (!$migrate || !get('patch_migrate'))) {
+                continue;
+            }
+            $tasks[] = $task;
+        }
     }
 
     return array_values(array_unique(array_merge($tasks, get('patch_post_tasks'))));
 }
 
-function patchRevert(array $entry, string $release): void
+function patchUnlock(): void
 {
-    if ($entry['file']) {
-        $file = "{{patch_dir}}/$release/{$entry['file']}";
-        patchApply($file, true);
-    }
-
-    $stack = patchStack($release);
-    array_pop($stack);
-    patchSaveStack($release, $stack);
-    if ($entry['file']) {
-        run("rm -f $file");
+    if (get('patch_locked')) {
+        run('rm -f {{deploy_path}}/.dep/deploy.lock');
+        set('patch_locked', false);
     }
 }
 
 // Tasks
 
-desc('Lock the deployment while patching');
-task('deploy:patch:lock', function () {
-    invoke('deploy:lock');
-    set('patch_locked', true);
-});
-
-desc('Fetch the branch and work out what needs patching');
+desc('Lock, fetch only the target branch and work out what needs patching');
 task('deploy:patch:prepare', function () {
     set('patch_noop', true);
+    set('patch_started', microtime(true));
 
-    if (!test('[ -L {{current_path}} ]')) {
-        throw new \RuntimeException('No current release found. Run deploy first.');
+    $ctx = patchProbe((bool) get('patch_lock'));
+    set('patch_release', $ctx['release']);
+    set('patch_path', $ctx['path']);
+    set('patch_stack', $ctx['stack']);
+
+    $fromRev = patchCurrentRev($ctx);
+
+    $url = escapeshellarg(get('repository'));
+    $gc = '-c gc.auto=0 -c maintenance.auto=false -c protocol.version=2';
+
+    if ($patchRef = get('patch_ref')) {
+        $ref = $patchRef;
+        // a commit we already have needs no network at all
+        $fetch = '{ git cat-file -e ' . escapeshellarg($patchRef . '^{commit}') . ' 2>/dev/null'
+            . " || git $gc fetch --quiet --no-tags $url '+refs/heads/*:refs/heads/*' 'refs/tags/*:refs/tags/*'; }";
+    } else {
+        $ref = 'refs/heads/' . get('patch_branch');
+        $spec = escapeshellarg('+' . $ref . ':' . $ref);
+        $fetch = "git $gc fetch --quiet --no-tags $url $spec";
     }
-    if (!test('[ -d {{patch_repo}} ]')) {
-        throw new \RuntimeException('Git cache {{patch_repo}} not found. Run deploy first.');
+
+    $out = run(implode(' && ', [
+        'cd {{patch_repo}}',
+        'export GIT_TERMINAL_PROMPT=0',
+        $fetch,
+        'to=$(git rev-parse --verify ' . escapeshellarg($ref . '^{commit}') . ')',
+        'from=$(git rev-parse --verify ' . escapeshellarg($fromRev . '^{commit}') . ')',
+        'echo "TO=$to"',
+        'echo "FROM=$from"',
+        'echo "BEHIND=$(git merge-base --is-ancestor $to $from && echo 1 || echo 0)"',
+        'echo "@@FILES"', 'git diff --name-only $from $to',
+        'echo "@@LOG"', 'git log --oneline --no-decorate $from..$to',
+        'echo "@@STAT"', 'git diff --stat $from $to',
+    ]));
+
+    preg_match('~^TO=([0-9a-f]+)$~m', $out, $t);
+    preg_match('~^FROM=([0-9a-f]+)$~m', $out, $f);
+    preg_match('~^BEHIND=(\d)$~m', $out, $b);
+    $to = $t[1] ?? '';
+    $from = $f[1] ?? '';
+
+    if (!$to || !$from) {
+        throw new \RuntimeException("Could not resolve commits.\n$out");
     }
-
-    // let the existing tasks (vendors, node_modules, artisan:*) work on the live release
-    $path = patchReleasePath();
-    set('release_path', $path);
-    set('release_or_current_path', $path);
-
-    $release = basename($path);
-    $from = patchGit('rev-parse --verify ' . escapeshellarg(patchCurrentRev($release) . '^{commit}'));
-
-    patchGit('remote set-url origin ' . escapeshellarg(get('repository')));
-    patchGit('remote update --prune');
-
-    $ref = get('patch_ref') ?: 'refs/heads/' . get('patch_branch');
-    $to = patchGit('rev-parse --verify ' . escapeshellarg($ref . '^{commit}'));
 
     if ($from === $to) {
-        info("Release $release is already at " . substr($to, 0, 8) . ', nothing to patch.');
+        patchNote("Release {$ctx['release']} is already at " . substr($to, 0, 8) . ', nothing to patch.');
 
         return;
     }
 
-    if (test('git -C {{patch_repo}} merge-base --is-ancestor ' . $to . ' ' . $from)
-        && !get('patch_allow_downgrade')) {
+    if (($b[1] ?? '0') === '1' && !get('patch_allow_downgrade')) {
         throw new \RuntimeException(
             "Target $ref (" . substr($to, 0, 8) . ') is behind the current commit. '
             . 'Use -o patch_allow_downgrade=true if that is intended.'
         );
     }
 
-    $files = array_filter(explode("\n", patchGit("diff --name-only $from $to")));
+    $files = array_values(array_filter(explode("\n", patchSection($out, 'FILES'))));
+
+    $log = patchSection($out, 'LOG');
+    $stat = patchSection($out, 'STAT');
+    $statLines = array_values(array_filter(explode("\n", $stat), 'strlen'));
+    $summary = array_pop($statLines); // "4 files changed, 116 insertions(+), 1 deletion(-)"
+    $commits = $log === '' ? 0 : count(explode("\n", $log));
+    $shortRef = preg_replace('~^refs/(heads|tags)/~', '', $ref);
 
     writeln('');
-    writeln("<info>Release:</info> $release  <info>Source:</info> $ref");
-    writeln('<info>Commits:</info>');
-    writeln(patchGit("log --oneline --no-decorate $from..$to") ?: '  (none, diff only)');
-    writeln('<info>Files:</info>');
-    writeln(patchGit("diff --stat $from $to"));
+    writeln(sprintf(
+        '<options=bold>Patching release %s</> <fg=cyan>%s</>  %s → %s',
+        OutputFormatter::escape($ctx['release']),
+        OutputFormatter::escape($shortRef),
+        substr($from, 0, 8),
+        substr($to, 0, 8)
+    ));
+    writeln('');
 
-    set('patch_release', $release);
+    if ($commits) {
+        patchLines(patchTrim($log, 10, 'commits'));
+        writeln('');
+    }
+
+    patchLines(patchTrim(implode("\n", $statLines), 15, 'files'));
+    patchLines($summary ?? '', '  ', 'fg=cyan');
+    writeln('');
+
     set('patch_from', $from);
     set('patch_to', $to);
-    set('patch_files', array_values($files));
+    set('patch_files', $files);
     set('patch_noop', false);
 });
 
@@ -229,65 +360,58 @@ task('deploy:patch:apply', function () {
     $release = get('patch_release');
     $from = get('patch_from');
     $to = get('patch_to');
+    $files = get('patch_files');
+    $dry = (bool) get('patch_dry_run');
+    $dir = '{{patch_dir}}/' . $release;
     $name = date('YmdHis') . '-' . substr($from, 0, 8) . '-' . substr($to, 0, 8) . '.patch';
-    $file = "{{patch_dir}}/$release/$name";
+    $file = "$dir/$name";
+
+    $entry = [
+        'id' => date('YmdHis'),
+        'file' => $files ? $name : null,
+        'from' => $from,
+        'to' => $to,
+        'files' => $files,
+        'time' => date('c'),
+    ];
+    $stack = array_merge(get('patch_stack'), [$entry]);
 
     // commits differ but the trees are identical (merge/rebase/empty commits): nothing to apply,
     // only move the tracked commit forward so the next patch starts from the right place
-    if (!get('patch_files')) {
-        info('Commits differ but no files changed.');
+    if (!$files) {
+        patchNote('Commits differ but no files changed.');
         set('patch_noop', true);
 
-        if (!get('patch_dry_run')) {
-            $stack = patchStack($release);
-            $stack[] = [
-                'id' => date('YmdHis'),
-                'file' => null,
-                'from' => $from,
-                'to' => $to,
-                'files' => [],
-                'time' => date('c'),
-            ];
-            patchSaveStack($release, $stack);
-            info('Release now tracked at ' . substr($to, 0, 8) . '.');
+        if (!$dry) {
+            run("mkdir -p $dir && " . patchWriteStack($stack, $release));
+            set('patch_stack', $stack);
+            patchOk('Release now tracked at ' . substr($to, 0, 8) . '.');
         }
 
         return;
     }
 
-    run('mkdir -p {{patch_dir}}/' . $release);
-    patchGit("diff --binary --full-index --no-color --no-ext-diff $from $to > $file");
+    $cmd = [
+        "mkdir -p $dir",
+        "git -C {{patch_repo}} diff --binary --full-index --no-color --no-ext-diff $from $to > $file",
+        "{ [ -s $file ] || { echo 'Generated patch is empty' >&2; false; }; }",
+        'cd ' . escapeshellarg(get('patch_path')),
+        '{ git apply --whitespace=nowarn ' . ($dry ? '--check ' : '') . "$file || { rm -f $file; false; }; }",
+    ];
+    $cmd[] = $dry ? "rm -f $file" : patchWriteStack($stack, $release);
 
-    if (!test("[ -s $file ]")) {
-        run("rm -f $file");
-        throw new \RuntimeException(
-            'Generated patch is empty. Check: git -C {{patch_repo}} diff --stat ' . substr($from, 0, 8) . ' ' . substr($to, 0, 8)
-        );
-    }
+    run(implode(' && ', $cmd));
 
-    if (get('patch_dry_run')) {
-        run('cd ' . patchReleasePath() . " && git apply --check --whitespace=nowarn $file");
-        run("rm -f $file");
-        info('Dry run: patch applies cleanly. Nothing changed.');
+    if ($dry) {
+        patchOk('Dry run: patch applies cleanly. Nothing changed.');
         set('patch_noop', true);
 
         return;
     }
 
-    patchApply($file);
     set('patch_applied', true);
-
-    $stack = patchStack($release);
-    $stack[] = [
-        'id' => date('YmdHis'),
-        'file' => $name,
-        'from' => $from,
-        'to' => $to,
-        'files' => get('patch_files'),
-        'time' => date('c'),
-    ];
-    patchSaveStack($release, $stack);
-    info('Patch applied: ' . substr($from, 0, 8) . ' -> ' . substr($to, 0, 8));
+    set('patch_stack', $stack);
+    patchOk(sprintf('Patch applied: %s → %s (%d files)', substr($from, 0, 8), substr($to, 0, 8), count($files)));
 });
 
 desc('Run the follow-up tasks the changed files call for');
@@ -296,46 +420,52 @@ task('deploy:patch:post', function () {
         return;
     }
 
-    foreach (patchPostTasks(get('patch_files')) as $task) {
+    $tasks = patchPostTasks(get('patch_files'));
+    patchNote($tasks ? 'Post tasks: ' . implode(', ', $tasks) : 'No post tasks needed for these files.');
+
+    foreach ($tasks as $task) {
         patchInvoke($task);
     }
 });
 
 desc('Unlock and tidy up patches of removed releases');
 task('deploy:patch:finish', function () {
+    $cmd = [];
     if (get('patch_locked')) {
-        invoke('deploy:unlock');
+        $cmd[] = 'rm -f {{deploy_path}}/.dep/deploy.lock';
         set('patch_locked', false);
     }
+    $cmd[] = 'cd {{patch_dir}} 2>/dev/null && for d in *; do [ -d "$d" ] || continue; '
+        . '[ -d {{deploy_path}}/releases/$d ] || rm -rf "$d"; done';
+    $cmd[] = 'true';
 
-    run('cd {{patch_dir}} 2>/dev/null && for d in *; do [ -d "$d" ] || continue; '
-        . '[ -d {{deploy_path}}/releases/$d ] || rm -rf "$d"; done || true');
+    run(implode(' ; ', $cmd));
+
+    if (get('patch_timing') && get('patch_started', null)) {
+        patchOk(sprintf('Done in %.1fs', microtime(true) - get('patch_started')));
+    }
 });
 
 desc('Roll back a failed patch and unlock');
 task('deploy:patch:failed', function () {
     if (get('patch_applied')) {
-        warning('Patch failed, rolling it back.');
-        $release = get('patch_release');
-        $stack = patchStack($release);
-        if ($stack) {
-            patchRevert(end($stack), $release);
-            foreach (patchPostTasks(get('patch_files'), false) as $task) {
-                patchInvoke($task);
-            }
-        }
+        patchWarn('Patch failed, rolling it back.');
+
+        [$cmd, $remaining] = patchRevertPlan(get('patch_stack'), get('patch_release'), get('patch_path'), 1);
+        run($cmd);
+        set('patch_stack', $remaining);
         set('patch_applied', false);
+
+        foreach (patchPostTasks(get('patch_files'), false) as $task) {
+            patchInvoke($task);
+        }
     }
 
-    if (get('patch_locked')) {
-        invoke('deploy:unlock');
-        set('patch_locked', false);
-    }
+    patchUnlock();
 });
 
 desc('Patch the current release with changes from a branch (supports rollback)');
 task('deploy:patch', [
-    'deploy:patch:lock',
     'deploy:patch:prepare',
     'deploy:patch:apply',
     'deploy:patch:post',
@@ -345,67 +475,60 @@ fail('deploy:patch', 'deploy:patch:failed');
 
 desc('List the patches applied to the current release');
 task('deploy:patch:list', function () {
-    $release = basename(patchReleasePath());
-    $stack = patchStack($release);
+    $ctx = patchProbe(false);
 
-    writeln("<info>Release $release</info>");
-    if (!$stack) {
-        writeln('No patches applied.');
+    if (!$ctx['stack']) {
+        patchNote("No patches applied to release {$ctx['release']}.");
 
         return;
     }
 
-    foreach (array_reverse($stack) as $i => $p) {
+    writeln("<options=bold>Release {$ctx['release']}</> " . count($ctx['stack']) . ' patch(es), newest first');
+    foreach (array_reverse($ctx['stack']) as $i => $p) {
         writeln(sprintf(
-            '%s %s  %s -> %s  (%d files)  %s',
-            $i === 0 ? '<info>latest</info>' : '      ',
+            '  %s %s → %s  %2d files  %s%s',
             $p['id'],
             substr($p['from'], 0, 8),
             substr($p['to'], 0, 8),
             count($p['files']),
-            $p['time']
+            $p['time'],
+            $i === 0 ? '  <fg=cyan>← next rollback</>' : ''
         ));
     }
 });
 
 desc('Roll back the last patch (or all with -o patch_rollback_all=true)');
 task('deploy:patch:rollback', function () {
-    $release = basename(patchReleasePath());
-    $path = patchReleasePath();
-    set('release_path', $path);
-    set('release_or_current_path', $path);
-
-    $stack = patchStack($release);
-    if (!$stack) {
-        warning("No patches to roll back on release $release.");
-
-        return;
-    }
-
-    invoke('deploy:lock');
+    $ctx = patchProbe((bool) get('patch_lock'));
 
     try {
+        if (!$ctx['stack']) {
+            patchNote("No patches to roll back on release {$ctx['release']}.");
+
+            return;
+        }
+
+        $count = get('patch_rollback_all') ? count($ctx['stack']) : 1;
+        [$cmd, , $reverted] = patchRevertPlan($ctx['stack'], $ctx['release'], $ctx['path'], $count);
+        run($cmd);
+
         $files = [];
         $migrated = false;
-
-        do {
-            $entry = end($stack);
-            info("Reverting {$entry['id']} (" . substr($entry['from'], 0, 8) . ' <- ' . substr($entry['to'], 0, 8) . ')');
-            patchRevert($entry, $release);
+        foreach ($reverted as $entry) {
+            patchOk(sprintf('Reverted %s: %s ← %s', $entry['id'], substr($entry['from'], 0, 8), substr($entry['to'], 0, 8)));
             $files = array_merge($files, $entry['files']);
             $migrated = $migrated || (bool) preg_grep('~^database/migrations/~', $entry['files']);
-            array_pop($stack);
-        } while (get('patch_rollback_all') && $stack);
+        }
 
         foreach (patchPostTasks($files, false) as $task) {
             patchInvoke($task);
         }
 
         if ($migrated) {
-            warning('The reverted patch contained migrations. The database was NOT rolled back; '
+            patchWarn('The reverted patch contained migrations. The database was NOT rolled back; '
                 . 'run artisan migrate:rollback manually if needed.');
         }
     } finally {
-        invoke('deploy:unlock');
+        patchUnlock();
     }
 });

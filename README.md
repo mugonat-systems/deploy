@@ -122,17 +122,16 @@ The `utils.php` file includes the following files:
 
 ### `patch.php`
 
-- **Purpose:** Patches the **current release in place** with the changes from a branch (or a specific commit), without creating a new release. Every patch is stored on the host, so it can be rolled back.
+- **Purpose:** Patches the **current release in place** with the changes from a branch (or a specific commit), without creating a new release. Every patch is stored on the host, so it can be rolled back. It is built for speed: remote work is batched into a handful of SSH round trips, only the target branch is fetched, and only the follow-up tasks the changed files need are run.
 - **Tasks:**
   * `deploy:patch`: The main task. A meta-task that runs the sub-tasks below in order and rolls back automatically if a step fails after the patch was applied.
-  * `deploy:patch:lock`: Locks the deployment (`deploy:lock`) while patching.
-  * `deploy:patch:prepare`: Fetches the branch into the cached mirror (`.dep/repo`), detects the commit the current release is on, and prints a summary (commits and `diff --stat`). Does nothing if the release is already up to date. Refuses a target that is behind the current commit unless `patch_allow_downgrade` is set.
-  * `deploy:patch:apply`: Writes `git diff --binary <current>..<target>` to `.dep/patches/<release>/`, validates it with `git apply --check`, then applies it. Applying is atomic: either all changes land or none do.
-  * `deploy:patch:post`: Runs only the follow-up tasks the changed files require (see below).
-  * `deploy:patch:finish`: Unlocks and removes stored patches of releases that no longer exist.
+  * `deploy:patch:prepare`: In one round trip takes the deploy lock and reads the current release, its patch history and `REVISION`. In a second round trip fetches **only the target branch** into the cached mirror (`.dep/repo`), resolves the commits and prints a summary (commits and `diff --stat`). Does nothing if the release is already up to date. Refuses a target that is behind the current commit unless `patch_allow_downgrade` is set.
+  * `deploy:patch:apply`: In one round trip writes `git diff --binary <current>..<target>` to `.dep/patches/<release>/`, applies it with `git apply` (atomic: either all changes land or none do) and saves the patch history.
+  * `deploy:patch:post`: Runs only the follow-up tasks the changed files require (see `patch_task_map` below).
+  * `deploy:patch:finish`: Unlocks, removes stored patches of releases that no longer exist, and prints how long the patch took.
   * `deploy:patch:failed`: Failure handler. Reverts the patch if it was already applied, re-runs the post tasks, and unlocks.
   * `deploy:patch:list`: Lists the patches applied to the current release, newest first.
-  * `deploy:patch:rollback`: Reverse-applies the last patch (`git apply -R`). Patches are rolled back last-in-first-out.
+  * `deploy:patch:rollback`: Reverse-applies the last patch (`git apply -R`) in a single round trip. Patches are rolled back last-in-first-out.
 - **Usage:**
   ```bash
   dep deploy:patch app.domain.tld                               # tip of the host's `branch`
@@ -143,32 +142,41 @@ The `utils.php` file includes the following files:
   dep deploy:patch:rollback app.domain.tld                      # undo the last patch
   dep deploy:patch:rollback app.domain.tld -o patch_rollback_all=true
   ```
-- **Post-patch tasks:** After applying (and after a rollback) these run based on the files that changed:
+- **Post-patch tasks:** After applying (and after a rollback) the tasks in `patch_task_map` whose pattern matches a changed file are run. The defaults:
 
   | Changed files | Task |
   | --- | --- |
   | `composer.json`, `composer.lock` | `deploy:vendors` |
-  | `package.json`, `package-lock.json`, `vite.config.*`, `webpack.mix.js`, `resources/**` | `deploy:node_modules` (only if `hook_node_modules` is `true`) |
+  | `package.json`, `package-lock.json`, `vite/webpack/tailwind/postcss` config, `webpack.mix.js`, `resources/{js,css,sass,scss,ts,images,fonts}/**` | `deploy:node_modules` (only if `hook_node_modules` is `true`) |
   | `database/migrations/**`, `database/seeders/**` | `artisan:migrate` (apply only, never on rollback) |
-  | anything | every task in `patch_post_tasks` |
+  | `config/**`, `routes/**`, `bootstrap/**`, `resources/views/**`, `.env*`, `composer.*` | `artisan:optimize` |
 
+  A change that only touches PHP files under `app/` therefore runs no follow-up task at all.
 - **Options:**
   * `patch_branch`: The branch to pull changes from. Defaults to the host's `branch`, then `git_repo_branch`, then `main`.
-  * `patch_ref`: A commit, tag, or SHA to patch to. Takes precedence over `patch_branch`. Defaults to `null`.
-  * `patch_base`: The commit the current release is on. Only needed if it can't be detected from the patch history or `.dep/releases_log`. Defaults to `null`.
+  * `patch_ref`: A commit, tag, or SHA to patch to. Takes precedence over `patch_branch`. If the commit is already in the cached mirror, no network access is needed. Defaults to `null`.
+  * `patch_base`: The commit the current release is on. Only needed if it can't be detected from the patch history, `current/REVISION`, or `.dep/releases_log`. Defaults to `null`.
   * `patch_dry_run`: Show the summary and check that the patch applies, without changing anything. Defaults to `false`.
   * `patch_allow_downgrade`: Allow patching to a commit that is behind the current one. Defaults to `false`.
   * `patch_rollback_all`: Makes `deploy:patch:rollback` revert every patch on the current release. Defaults to `false`.
   * `patch_migrate`: Run `artisan:migrate` when migrations or seeders changed. Defaults to `true`.
-  * `patch_post_tasks`: Tasks that always run after a patch or rollback. Defaults to `['artisan:optimize']`.
+  * `patch_task_map`: Map of regex (matched against changed file paths) to the tasks to run. See the table above for the defaults. Add your own, e.g. `'~^app/Jobs/~' => ['artisan:queue:restart']`.
+  * `patch_post_tasks`: Tasks that always run after a patch or rollback, whatever changed. Defaults to `[]`.
+  * `patch_lock`: Hold the deploy lock while patching. Uses the same `.dep/deploy.lock` file as `deploy:lock`. Defaults to `true`.
+  * `patch_timing`: Print how long the patch took. Defaults to `true`.
   * `patch_dir`: Where patches are stored on the host. Defaults to `{{deploy_path}}/.dep/patches`.
   * `patch_repo`: Deployer's cached git mirror on the host. Defaults to `{{deploy_path}}/.dep/repo`.
 
   Options can be set per host with `->set('patch_branch', '...')` or per run with `-o`.
 - **Hooks:** None. `deploy:patch` is run on demand, and `fail('deploy:patch', 'deploy:patch:failed')` registers the automatic rollback.
+- **Speed tips:**
+  * Keep SSH multiplexing enabled (`ssh_multiplexing`, on by default) so each round trip reuses one connection.
+  * If PHP's opcache runs with `validate_timestamps=0`, patched files are not picked up until opcache is reset. Add a reload task to `patch_post_tasks` or `patch_task_map` (for example `php-fpm:reload`, if you define one).
+  * `deploy:vendors` and `deploy:node_modules` dominate the runtime when they run. Keeping dependency changes out of hotfix branches keeps patches fast.
 - **Notes:**
   * A full `deploy` must have been run first, since patching needs a current release and the cached mirror.
   * Releases are exported without `.git`, which is why changes are applied as a diff rather than pulled inside the release.
   * Database changes are **not** reverted by a rollback. If a rolled-back patch contained migrations, a warning is shown and `php artisan migrate:rollback` must be run manually if needed.
-  * Rolling back fails safely (at `git apply --check`) if the patched files were edited by hand after patching.
+  * Rolling back fails safely if the patched files were edited by hand after patching.
   * Patching a file that is a shared symlink (`shared_files`) will fail, since those files live outside the release.
+  * A stale `.dep/deploy.lock` (for example after a crashed run) blocks patching, same as a normal deploy. Run `dep deploy:unlock`.
